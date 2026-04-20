@@ -18,6 +18,7 @@ st.markdown("""
     .main-header { font-size: 2.5rem; font-weight: 600; color: #1f77b4; }
     .hero-card { background: linear-gradient(135deg, #1f77b4 0%, #2C5282 100%); border-radius: 16px; padding: 2rem; color: white; text-align: center; }
     .alert-card { background: #dc3545; border-radius: 16px; padding: 2rem; color: white; text-align: center; }
+    .pick-card { background: #f8f9fa; border-radius: 12px; padding: 1.5rem; margin-bottom: 1rem; box-shadow: 0 2px 8px rgba(0,0,0,0.05); }
     .signal-tag { display: inline-block; padding: 0.3rem 0.8rem; border-radius: 20px; font-weight: bold; }
     .defensive { background: #28a745; color: white; }
     .momentum { background: #007bff; color: white; }
@@ -26,6 +27,8 @@ st.markdown("""
     .confidence-high { color: #28a745; font-weight: bold; }
     .confidence-mid { color: #ffc107; font-weight: bold; }
     .confidence-low { color: #dc3545; font-weight: bold; }
+    .return-positive { color: #28a745; font-weight: 600; }
+    .return-negative { color: #dc3545; font-weight: 600; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -58,6 +61,12 @@ def confidence_badge(conf):
     else:
         return f'<span class="confidence-low">{conf:.2f} (Low)</span>'
 
+def return_badge(ret):
+    if ret >= 0:
+        return f'<span class="return-positive">+{ret*100:.2f}%</span>'
+    else:
+        return f'<span class="return-negative">{ret*100:.2f}%</span>'
+
 # --- Sidebar ---
 st.sidebar.markdown("## ⚙️ Configuration")
 st.sidebar.markdown(f"**Data Source:** `{config.HF_DATA_REPO}`")
@@ -67,6 +76,7 @@ st.sidebar.divider()
 st.sidebar.markdown("### 🧬 TDA Parameters")
 st.sidebar.markdown(f"- Lookback: **{config.LOOKBACK_WINDOW} days**")
 st.sidebar.markdown(f"- Max Homology Dim: **{config.MAX_DIM}**")
+st.sidebar.markdown(f"- Return Lookback: **{config.RETURN_LOOKBACK_DAYS} days**")
 
 data = load_latest_results()
 if data:
@@ -78,22 +88,21 @@ st.markdown('<div>Persistent Homology – Market Structure & ETF Selection Signa
 with st.expander("📘 How to Interpret TDA Signals", expanded=False):
     st.markdown("""
     ### Topological Metrics
-    - **Betti‑0**: Number of connected components in the data cloud.
-    - **Betti‑1**: Number of 1‑dimensional holes (loops) — **key indicator of market complexity**.  
-      *Rising Betti‑1* → market fragmentation / stress.  
-      *Falling Betti‑1* → structure simplifying, trends emerging.
-    - **Max Persistence**: Lifetime of the most persistent topological feature.  
-      *Spikes* often precede regime breaks (e.g., 2008, 2020).
+    - **Betti‑1 Trend**: Rising → fragmentation (defensive). Falling → simplification (momentum).
+    - **Max Persistence Spike**: Regime break → safe havens.
 
-    ### Confidence Score Interpretation
-    | Confidence | Meaning | Recommended Action |
-    |------------|---------|---------------------|
-    | **0.80 – 1.00** | Strong topological signal | Higher conviction in the recommended ETF |
-    | **0.50 – 0.79** | Moderate signal | Use as a tilt; confirm with other engines (BSTS, HRP) |
-    | **0.00 – 0.49** | Weak / no clear edge | Default to neutral or rely on other signals |
+    ### Confidence Score
+    | Confidence | Meaning | Action |
+    |------------|---------|--------|
+    | 0.80–1.00 | Strong signal | Higher conviction |
+    | 0.50–0.79 | Moderate | Use as tilt |
+    | 0.00–0.49 | Weak | Rely on other engines |
     
-    A confidence of **0.50** is the midpoint — the model is uncertain and suggests using other engines.
-    """)
+    Confidence of **0.50** = model uncertain; defer to other signals.
+    
+    ### Top Picks
+    Selected from style‑specific candidates based on **{}-day return** (highest first).
+    """.format(config.RETURN_LOOKBACK_DAYS))
 
 if data is None:
     st.warning("No data available.")
@@ -101,7 +110,7 @@ if data is None:
 
 daily = data['daily_tda']
 global_signal = data.get('global_signal', {})
-top_picks = daily.get('top_picks', {})
+top_picks_all = daily.get('top_picks', {})
 universes_data = daily.get('universes', {})
 
 # --- Hero Section: Global Regime ---
@@ -116,61 +125,34 @@ with col3:
     st.markdown(f"**Recommended Style:** {style_tag(style)}", unsafe_allow_html=True)
 
 st.markdown("---")
-st.markdown("## 📈 Top 3 ETF Picks by Universe")
+st.markdown(f"## 📈 Top 3 ETF Picks by Universe (Ranked by {config.RETURN_LOOKBACK_DAYS}-Day Return)")
 
 tabs = st.tabs(["📊 Combined", "📈 Equity Sectors", "💰 FI/Commodities"])
 universe_keys = ["COMBINED", "EQUITY_SECTORS", "FI_COMMODITIES"]
 
-# Generate top 3 picks per universe based on signal confidence and style
 for tab, key in zip(tabs, universe_keys):
     with tab:
-        universe_data = universes_data.get(key, {})
-        signal_info = universe_data.get('signal', {})
-        top_pick = top_picks.get(key, {})
+        pick_data = top_picks_all.get(key, {})
+        picks = pick_data.get('picks', [])
+        reg = pick_data.get('regime', 'neutral')
+        conf = pick_data.get('confidence', 0.5)
+        style = pick_data.get('recommended_style', 'neutral')
         
-        # For now, we only have one top pick; we'll display it prominently
-        # and note that additional picks would come from style alternatives
-        if top_pick:
-            card_class = "alert-card" if key in daily.get('alerts', {}) else "hero-card"
-            st.markdown(f"""
-            <div class="{card_class}">
-                <h2>🥇 {top_pick['ticker']}</h2>
-                <p>Regime: {top_pick['regime'].replace('_', ' ').title()} | Confidence: {confidence_badge(top_pick['confidence'])}</p>
-                <p>Style: {style_tag(top_pick['recommended_style'])}</p>
-            </div>
-            """, unsafe_allow_html=True)
-            
-            # Show second and third picks based on alternative styles
-            st.markdown("### Alternative Picks (Other Styles)")
-            alt_styles = []
-            if top_pick['recommended_style'] != 'defensive':
-                alt_styles.append(('Defensive', 'defensive', 0.6))
-            if top_pick['recommended_style'] != 'momentum':
-                alt_styles.append(('Momentum', 'momentum', 0.6))
-            if top_pick['recommended_style'] != 'safe_haven':
-                alt_styles.append(('Safe Haven', 'safe_haven', 0.5))
-            
-            # Map styles to tickers for this universe
-            style_map = {
-                'defensive': {'FI_COMMODITIES': 'TLT', 'EQUITY_SECTORS': 'XLP', 'COMBINED': 'XLP'},
-                'momentum': {'FI_COMMODITIES': 'HYG', 'EQUITY_SECTORS': 'SPY', 'COMBINED': 'SPY'},
-                'safe_haven': {'FI_COMMODITIES': 'GLD', 'EQUITY_SECTORS': 'GLD', 'COMBINED': 'GLD'}
-            }
-            
-            cols = st.columns(len(alt_styles))
-            for i, (label, style, base_conf) in enumerate(alt_styles[:2]):  # show up to 2 alternatives
-                ticker = style_map.get(style, {}).get(key, 'N/A')
+        if picks:
+            st.markdown(f"**Regime:** {reg.replace('_', ' ').title()} | **Confidence:** {confidence_badge(conf)} | **Style:** {style_tag(style)}")
+            cols = st.columns(3)
+            for i, pick in enumerate(picks[:3]):
                 with cols[i]:
+                    ret = pick['return_21d']
                     st.markdown(f"""
-                    <div style="background: #f8f9fa; border-radius: 12px; padding: 1rem; text-align: center;">
-                        <h3>{label}</h3>
-                        <h4>{ticker}</h4>
-                        <p>Style: {style_tag(style)}</p>
-                        <p>Confidence: {confidence_badge(base_conf)} (estimated)</p>
+                    <div class="pick-card">
+                        <h3>#{i+1} {pick['ticker']}</h3>
+                        <p style="font-size: 1.5rem;">{return_badge(ret)}</p>
+                        <p>{config.RETURN_LOOKBACK_DAYS}-day return</p>
                     </div>
                     """, unsafe_allow_html=True)
         else:
-            st.info("No recommendation available.")
+            st.info("No picks available for this universe.")
 
 # --- Topological Metrics Table ---
 st.markdown("---")
