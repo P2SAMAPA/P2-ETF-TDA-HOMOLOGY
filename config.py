@@ -33,6 +33,9 @@ MAX_DIM = 2                           # Compute H0, H1, H2 persistent homology
 N_LANDSCAPES = 5                      # Number of persistence landscapes to extract
 MIN_OBSERVATIONS = 100                # Minimum observations for TDA
 
+# --- Return Selection Parameters ---
+RETURN_LOOKBACK_DAYS = 21             # Period for ranking ETFs within a style
+
 # --- Early Warning Signals ---
 BETTI_ALERT_THRESHOLD = 0.5           # Normalized Betti number change threshold
 PERSISTENCE_ALERT_PERCENTILE = 90     # Alert when max persistence exceeds percentile
@@ -45,6 +48,3 @@ TODAY = datetime.now().strftime("%Y-%m-%d")
 
 # --- Optional: Hugging Face Token ---
 HF_TOKEN = os.environ.get("HF_TOKEN", None)
-
-# --- Return Selection Parameters ---
-RETURN_LOOKBACK_DAYS = 21            # Period for ranking ETFs within a style
