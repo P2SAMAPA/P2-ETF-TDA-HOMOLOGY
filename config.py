@@ -45,3 +45,6 @@ TODAY = datetime.now().strftime("%Y-%m-%d")
 
 # --- Optional: Hugging Face Token ---
 HF_TOKEN = os.environ.get("HF_TOKEN", None)
+
+# --- Return Selection Parameters ---
+RETURN_LOOKBACK_DAYS = 21            # Period for ranking ETFs within a style
