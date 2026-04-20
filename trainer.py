@@ -12,33 +12,46 @@ import data_manager
 from tda_model import TDAHomologyAnalyzer
 import push_results
 
-# Style-to-ETF mapping per universe
-STYLE_ETF_MAP = {
+# Style-to-candidate ETFs mapping per universe
+STYLE_CANDIDATES = {
     'defensive': {
-        'FI_COMMODITIES': 'TLT',
-        'EQUITY_SECTORS': 'XLP',
-        'COMBINED': 'XLP'
+        'FI_COMMODITIES': ['TLT', 'LQD', 'VCIT'],
+        'EQUITY_SECTORS': ['XLP', 'XLU', 'XLV'],
+        'COMBINED': ['XLP', 'XLU', 'TLT', 'LQD']
     },
     'momentum': {
-        'FI_COMMODITIES': 'HYG',
-        'EQUITY_SECTORS': 'SPY',
-        'COMBINED': 'SPY'
+        'FI_COMMODITIES': ['HYG', 'VNQ', 'GLD'],
+        'EQUITY_SECTORS': ['SPY', 'QQQ', 'XLK', 'IWF'],
+        'COMBINED': ['SPY', 'QQQ', 'HYG', 'IWF']
     },
     'safe_haven': {
-        'FI_COMMODITIES': 'GLD',
-        'EQUITY_SECTORS': 'GLD',
-        'COMBINED': 'GLD'
+        'FI_COMMODITIES': ['GLD', 'SLV', 'TLT'],
+        'EQUITY_SECTORS': ['GLD', 'XLP', 'XLU'],
+        'COMBINED': ['GLD', 'SLV', 'TLT']
     },
     'neutral': {
-        'FI_COMMODITIES': 'LQD',
-        'EQUITY_SECTORS': 'SPY',
-        'COMBINED': 'SPY'
+        'FI_COMMODITIES': ['LQD', 'VCIT', 'HYG'],
+        'EQUITY_SECTORS': ['SPY', 'XLV', 'XLI'],
+        'COMBINED': ['SPY', 'LQD', 'XLV']
     }
 }
 
-def select_etf_from_signal(signal: dict, universe: str) -> str:
-    style = signal.get('recommended_style', 'neutral')
-    return STYLE_ETF_MAP.get(style, {}).get(universe, config.ALL_TICKERS[0])
+def compute_returns_matrix(df_wide: pd.DataFrame, tickers: list) -> pd.DataFrame:
+    """Compute recent returns for ranking."""
+    prices = df_wide.set_index('Date')[tickers]
+    returns = prices.pct_change(config.RETURN_LOOKBACK_DAYS).iloc[-1]
+    return returns
+
+def select_top_etfs_by_return(universe: str, style: str, returns: pd.Series, n: int = 3) -> list:
+    """Select top N ETFs from style candidates based on return."""
+    candidates = STYLE_CANDIDATES.get(style, {}).get(universe, [])
+    available = [t for t in candidates if t in returns.index]
+    if not available:
+        # fallback to all tickers in universe
+        available = config.UNIVERSES[universe]
+    sorted_etfs = returns[available].sort_values(ascending=False)
+    top = sorted_etfs.head(n)
+    return [{'ticker': t, 'return_21d': float(v)} for t, v in top.items()]
 
 def run_tda_analysis():
     print(f"=== P2-ETF-TDA-HOMOLOGY Run: {config.TODAY} ===")
@@ -46,10 +59,10 @@ def run_tda_analysis():
     analyzer = TDAHomologyAnalyzer(max_dim=config.MAX_DIM, n_landscapes=config.N_LANDSCAPES)
     
     all_results = {}
-    top_picks = {}
+    top_picks_all = {}
     alerts = {}
     
-    # Combined universe for global TDA (used for signal)
+    # Combined universe for global TDA signal
     returns_combined = data_manager.prepare_returns_matrix(df_master, config.ALL_TICKERS)
     if len(returns_combined) >= config.MIN_OBSERVATIONS:
         recent_combined = returns_combined.iloc[-config.LOOKBACK_WINDOW:]
@@ -65,31 +78,35 @@ def run_tda_analysis():
             continue
         recent_returns = returns.iloc[-config.LOOKBACK_WINDOW:]
         
-        # Local TDA for this universe
+        # Local TDA metrics
         point_cloud = analyzer.compute_point_cloud(recent_returns, method='correlation')
         pers = analyzer.compute_persistence(point_cloud, is_distance=True)
         
-        # Determine top pick based on global signal (or local if you prefer)
-        top_etf = select_etf_from_signal(global_signal, universe_name)
+        # Compute 21-day returns for ranking
+        returns_21d = compute_returns_matrix(df_master, tickers)
+        
+        # Select top 3 ETFs for the recommended style
+        style = global_signal['recommended_style']
+        top_picks = select_top_etfs_by_return(universe_name, style, returns_21d, n=3)
         
         all_results[universe_name] = {
             'betti_numbers': pers['betti_numbers'],
             'max_persistence': pers['max_persistence'],
             'signal': global_signal,
-            'top_pick': top_etf
+            'top_picks': top_picks
         }
         
-        top_picks[universe_name] = {
-            'ticker': top_etf,
+        top_picks_all[universe_name] = {
             'regime': global_signal['regime'],
             'confidence': global_signal['confidence'],
-            'recommended_style': global_signal['recommended_style']
+            'recommended_style': style,
+            'picks': top_picks
         }
         
         if global_signal['regime'] in ['fragmentation', 'regime_break']:
-            alerts[universe_name] = top_picks[universe_name]
+            alerts[universe_name] = top_picks_all[universe_name]
     
-    # Shrinking windows (simplified)
+    # Shrinking windows
     shrinking_results = {}
     for start_year in config.SHRINKING_WINDOW_START_YEARS:
         start_date = pd.Timestamp(f"{start_year}-01-01")
@@ -115,12 +132,13 @@ def run_tda_analysis():
         "run_date": config.TODAY,
         "config": {
             "lookback_window": config.LOOKBACK_WINDOW,
-            "max_dim": config.MAX_DIM
+            "max_dim": config.MAX_DIM,
+            "return_lookback_days": config.RETURN_LOOKBACK_DAYS
         },
         "global_signal": global_signal,
         "daily_tda": {
             "universes": all_results,
-            "top_picks": top_picks,
+            "top_picks": top_picks_all,
             "alerts": alerts
         },
         "shrinking_windows": shrinking_results
