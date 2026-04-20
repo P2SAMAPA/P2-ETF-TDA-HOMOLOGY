@@ -1,3 +1,8 @@
+"""
+Streamlit Dashboard for TDA Homology Engine.
+Displays topological metrics and ETF selection signals.
+"""
+
 import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
@@ -11,8 +16,13 @@ st.set_page_config(page_title="P2Quant TDA Homology", page_icon="🧬", layout="
 st.markdown("""
 <style>
     .main-header { font-size: 2.5rem; font-weight: 600; color: #1f77b4; }
+    .hero-card { background: linear-gradient(135deg, #1f77b4 0%, #2C5282 100%); border-radius: 16px; padding: 2rem; color: white; text-align: center; }
     .alert-card { background: #dc3545; border-radius: 16px; padding: 2rem; color: white; text-align: center; }
-    .normal-card { background: linear-gradient(135deg, #1f77b4 0%, #2C5282 100%); border-radius: 16px; padding: 2rem; color: white; text-align: center; }
+    .signal-tag { display: inline-block; padding: 0.3rem 0.8rem; border-radius: 20px; font-weight: bold; }
+    .defensive { background: #28a745; color: white; }
+    .momentum { background: #007bff; color: white; }
+    .safe_haven { background: #ffc107; color: black; }
+    .neutral { background: #6c757d; color: white; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -22,15 +32,20 @@ def load_latest_results():
         api = HfApi(token=config.HF_TOKEN)
         files = api.list_repo_files(repo_id=config.HF_OUTPUT_REPO, repo_type="dataset")
         json_files = sorted([f for f in files if f.endswith('.json')], reverse=True)
-        if not json_files: return None
+        if not json_files:
+            return None
         local_path = hf_hub_download(
             repo_id=config.HF_OUTPUT_REPO, filename=json_files[0],
             repo_type="dataset", token=config.HF_TOKEN, cache_dir="./hf_cache"
         )
-        with open(local_path) as f: return json.load(f)
+        with open(local_path) as f:
+            return json.load(f)
     except Exception as e:
         st.error(f"Failed to load data: {e}")
         return None
+
+def style_tag(style):
+    return f'<span class="signal-tag {style}">{style.upper()}</span>'
 
 # --- Sidebar ---
 st.sidebar.markdown("## ⚙️ Configuration")
@@ -47,15 +62,13 @@ if data:
     st.sidebar.markdown(f"**Run Date:** {data.get('run_date', 'Unknown')}")
 
 st.markdown('<div class="main-header">🧬 P2Quant TDA Homology Engine</div>', unsafe_allow_html=True)
-st.markdown('<div>Persistent Homology on ETF Return/Correlation Clouds – Early Regime Warnings</div>', unsafe_allow_html=True)
+st.markdown('<div>Persistent Homology – Market Structure & ETF Selection Signals</div>', unsafe_allow_html=True)
 
-with st.expander("📘 How to Interpret TDA Metrics", expanded=False):
+with st.expander("📘 How to Interpret TDA Signals", expanded=False):
     st.markdown("""
-    - **Betti‑0**: Number of connected components.
-    - **Betti‑1**: Number of 1‑dimensional holes (loops) in the data cloud — **key indicator of market structure complexity**.
-    - **Betti‑2**: Number of 2‑dimensional voids (rare).
-    - **Max Persistence**: Lifetime of the most persistent topological feature. Spikes often precede regime breaks.
-    - **Warning**: Triggered when Betti‑1 changes rapidly OR max persistence exceeds 2σ.
+    - **Betti‑1 Trend**: Rising → market fragmentation → defensive ETFs (XLP, TLT). Falling → trend emergence → momentum ETFs (SPY, QQQ).
+    - **Max Persistence Spike**: Regime break warning → safe havens (GLD) or cash.
+    - **Recommended ETF**: Selected based on current topological regime.
     """)
 
 if data is None:
@@ -63,49 +76,60 @@ if data is None:
     st.stop()
 
 daily = data['daily_tda']
-alerts = daily.get('top_alerts', {})
+global_signal = data.get('global_signal', {})
+top_picks = daily.get('top_picks', {})
 
-tab1, tab2 = st.tabs(["📋 Daily TDA Dashboard", "📆 Shrinking Windows"])
+# --- Hero Section: Global Regime & Top Pick ---
+st.markdown("## 🌐 Global Market Regime")
+col1, col2, col3 = st.columns(3)
+with col1:
+    st.metric("Regime", global_signal.get('regime', 'unknown').replace('_', ' ').title())
+with col2:
+    st.metric("Confidence", f"{global_signal.get('confidence', 0):.2f}")
+with col3:
+    style = global_signal.get('recommended_style', 'neutral')
+    st.markdown(f"**Recommended Style:** {style_tag(style)}", unsafe_allow_html=True)
 
-with tab1:
-    if alerts:
-        st.markdown("### 🚨 Active Topological Warnings")
-        for uni, alert in alerts.items():
-            st.markdown(f"""
-            <div class="alert-card">
-                <h2>{uni}</h2>
-                <p>Betti‑1: {alert['betti_1']} | Max Persistence: {alert['max_persistence']:.4f}</p>
-                <p>{alert['warning']}</p>
-            </div>
-            """, unsafe_allow_html=True)
-    else:
-        st.success("No topological warnings detected. Market structure appears stable.")
-    
-    st.markdown("### Universe TDA Metrics")
-    cols = st.columns(3)
-    for i, (uni, metrics) in enumerate(daily['universes'].items()):
-        with cols[i % 3]:
-            alert = metrics['tda_warning']
-            card_class = "alert-card" if alert else "normal-card"
+st.markdown("---")
+st.markdown("## 📈 Recommended ETFs by Universe")
+
+tabs = st.tabs(["📊 Combined", "📈 Equity Sectors", "💰 FI/Commodities"])
+universe_keys = ["COMBINED", "EQUITY_SECTORS", "FI_COMMODITIES"]
+
+for tab, key in zip(tabs, universe_keys):
+    with tab:
+        pick = top_picks.get(key, {})
+        if pick:
+            card_class = "alert-card" if key in daily.get('alerts', {}) else "hero-card"
             st.markdown(f"""
             <div class="{card_class}">
-                <h3>{uni}</h3>
-                <p>Betti: {metrics['betti_numbers']}</p>
-                <p>Max Persistence: {metrics['max_persistence']:.4f}</p>
-                <p>{'⚠️ Warning' if alert else '✅ Stable'}</p>
+                <h2>{pick['ticker']}</h2>
+                <p>Regime: {pick['regime'].replace('_', ' ').title()} | Confidence: {pick['confidence']:.2f}</p>
+                <p>Style: {style_tag(pick['recommended_style'])}</p>
             </div>
             """, unsafe_allow_html=True)
+        else:
+            st.info("No recommendation available.")
 
-with tab2:
-    st.markdown("### Betti‑1 Evolution Across Historical Windows")
-    shrinking = data.get('shrinking_windows', {})
-    if shrinking:
-        df = pd.DataFrame(shrinking).T
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(x=df.index, y=df['betti_1'], mode='lines+markers', name='Betti‑1'))
-        fig.add_trace(go.Scatter(x=df.index, y=df['max_persistence'], mode='lines+markers', name='Max Persistence', yaxis='y2'))
-        fig.update_layout(yaxis2=dict(overlaying='y', side='right'), height=400)
-        st.plotly_chart(fig, use_container_width=True)
-        st.dataframe(df)
-    else:
-        st.info("No shrinking windows data.")
+# --- Topological Metrics Table ---
+st.markdown("---")
+st.markdown("### 🔬 Topological Metrics by Universe")
+rows = []
+for uni, metrics in daily['universes'].items():
+    rows.append({
+        'Universe': uni,
+        'Betti‑0': metrics['betti_numbers'][0],
+        'Betti‑1': metrics['betti_numbers'][1],
+        'Betti‑2': metrics['betti_numbers'][2] if len(metrics['betti_numbers'])>2 else 0,
+        'Max Persistence': f"{metrics['max_persistence']:.4f}"
+    })
+df_metrics = pd.DataFrame(rows)
+st.dataframe(df_metrics, use_container_width=True, hide_index=True)
+
+# --- Shrinking Windows (optional) ---
+if data.get('shrinking_windows'):
+    st.markdown("---")
+    st.markdown("### 📆 Historical Regime Evolution")
+    shrink = data['shrinking_windows']
+    df_shrink = pd.DataFrame(shrink).T
+    st.dataframe(df_shrink[['regime', 'confidence', 'recommended_style']], use_container_width=True)
