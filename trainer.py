@@ -1,6 +1,6 @@
 """
 Main training script for TDA-HOMOLOGY engine.
-Computes persistent homology on ETF universes and generates early-warning signals.
+Computes persistent homology and generates ETF selection signals.
 """
 
 import json
@@ -12,13 +12,51 @@ import data_manager
 from tda_model import TDAHomologyAnalyzer
 import push_results
 
+# Style-to-ETF mapping per universe
+STYLE_ETF_MAP = {
+    'defensive': {
+        'FI_COMMODITIES': 'TLT',
+        'EQUITY_SECTORS': 'XLP',
+        'COMBINED': 'XLP'
+    },
+    'momentum': {
+        'FI_COMMODITIES': 'HYG',
+        'EQUITY_SECTORS': 'SPY',
+        'COMBINED': 'SPY'
+    },
+    'safe_haven': {
+        'FI_COMMODITIES': 'GLD',
+        'EQUITY_SECTORS': 'GLD',
+        'COMBINED': 'GLD'
+    },
+    'neutral': {
+        'FI_COMMODITIES': 'LQD',
+        'EQUITY_SECTORS': 'SPY',
+        'COMBINED': 'SPY'
+    }
+}
+
+def select_etf_from_signal(signal: dict, universe: str) -> str:
+    style = signal.get('recommended_style', 'neutral')
+    return STYLE_ETF_MAP.get(style, {}).get(universe, config.ALL_TICKERS[0])
+
 def run_tda_analysis():
     print(f"=== P2-ETF-TDA-HOMOLOGY Run: {config.TODAY} ===")
     df_master = data_manager.load_master_data()
     analyzer = TDAHomologyAnalyzer(max_dim=config.MAX_DIM, n_landscapes=config.N_LANDSCAPES)
     
     all_results = {}
-    top_alerts = {}
+    top_picks = {}
+    alerts = {}
+    
+    # Combined universe for global TDA (used for signal)
+    returns_combined = data_manager.prepare_returns_matrix(df_master, config.ALL_TICKERS)
+    if len(returns_combined) >= config.MIN_OBSERVATIONS:
+        recent_combined = returns_combined.iloc[-config.LOOKBACK_WINDOW:]
+        analyzer.rolling_tda(returns_combined.iloc[-504:], window=config.LOOKBACK_WINDOW)
+        global_signal = analyzer.compute_regime_signal()
+    else:
+        global_signal = {'regime': 'unknown', 'confidence': 0.0, 'recommended_style': 'neutral'}
     
     for universe_name, tickers in config.UNIVERSES.items():
         print(f"\n--- Processing Universe: {universe_name} ---")
@@ -27,40 +65,31 @@ def run_tda_analysis():
             continue
         recent_returns = returns.iloc[-config.LOOKBACK_WINDOW:]
         
-        # Single window TDA for today
+        # Local TDA for this universe
         point_cloud = analyzer.compute_point_cloud(recent_returns, method='correlation')
-        pers = analyzer.compute_persistence(point_cloud)
+        pers = analyzer.compute_persistence(point_cloud, is_distance=True)
         
-        # Rolling TDA for history (last 2 years)
-        tda_history = analyzer.rolling_tda(returns.iloc[-504:], window=config.LOOKBACK_WINDOW)
-        tda_warning = analyzer.compute_early_warning(tda_history)
-        
-        # Alert if Betti-1 changes significantly or persistence spikes
-        latest = tda_warning.iloc[-1] if len(tda_warning) > 0 else pd.Series()
-        alert = False
-        if len(latest) > 0:
-            betti_change = latest.get('betti_1_change', 0)
-            pers_z = latest.get('persistence_z', 0)
-            if betti_change > config.BETTI_ALERT_THRESHOLD or pers_z > 2.0:
-                alert = True
+        # Determine top pick based on global signal (or local if you prefer)
+        top_etf = select_etf_from_signal(global_signal, universe_name)
         
         all_results[universe_name] = {
             'betti_numbers': pers['betti_numbers'],
             'max_persistence': pers['max_persistence'],
-            'tda_warning': alert,
-            'latest_metrics': latest.to_dict() if len(latest) > 0 else {},
-            'history': tda_history.reset_index().to_dict(orient='list') if len(tda_history) > 0 else {}
+            'signal': global_signal,
+            'top_pick': top_etf
         }
         
-        if alert:
-            top_alerts[universe_name] = {
-                'universe': universe_name,
-                'betti_1': pers['betti_numbers'][1],
-                'max_persistence': pers['max_persistence'],
-                'warning': 'Regime shift likely — topological structure changing'
-            }
+        top_picks[universe_name] = {
+            'ticker': top_etf,
+            'regime': global_signal['regime'],
+            'confidence': global_signal['confidence'],
+            'recommended_style': global_signal['recommended_style']
+        }
+        
+        if global_signal['regime'] in ['fragmentation', 'regime_break']:
+            alerts[universe_name] = top_picks[universe_name]
     
-    # Shrinking windows (simplified: only store top alert per window)
+    # Shrinking windows (simplified)
     shrinking_results = {}
     for start_year in config.SHRINKING_WINDOW_START_YEARS:
         start_date = pd.Timestamp(f"{start_year}-01-01")
@@ -69,27 +98,30 @@ def run_tda_analysis():
         df_window = df_master[mask].copy()
         if len(df_window) < config.MIN_OBSERVATIONS:
             continue
-        window_returns = data_manager.prepare_returns_matrix(df_window, config.ALL_TICKERS)
-        if len(window_returns) < config.MIN_OBSERVATIONS:
+        win_returns = data_manager.prepare_returns_matrix(df_window, config.ALL_TICKERS)
+        if len(win_returns) < config.MIN_OBSERVATIONS:
             continue
-        pc = analyzer.compute_point_cloud(window_returns.iloc[-config.LOOKBACK_WINDOW:], method='correlation')
-        pers = analyzer.compute_persistence(pc)
+        win_analyzer = TDAHomologyAnalyzer(max_dim=config.MAX_DIM)
+        win_analyzer.rolling_tda(win_returns.iloc[-config.LOOKBACK_WINDOW:], window=config.LOOKBACK_WINDOW)
+        win_signal = win_analyzer.compute_regime_signal()
         shrinking_results[window_label] = {
             'start_year': start_year,
-            'betti_1': pers['betti_numbers'][1],
-            'max_persistence': pers['max_persistence']
+            'regime': win_signal['regime'],
+            'confidence': win_signal['confidence'],
+            'recommended_style': win_signal['recommended_style']
         }
     
     output_payload = {
         "run_date": config.TODAY,
         "config": {
             "lookback_window": config.LOOKBACK_WINDOW,
-            "max_dim": config.MAX_DIM,
-            "betti_alert_threshold": config.BETTI_ALERT_THRESHOLD
+            "max_dim": config.MAX_DIM
         },
+        "global_signal": global_signal,
         "daily_tda": {
             "universes": all_results,
-            "top_alerts": top_alerts
+            "top_picks": top_picks,
+            "alerts": alerts
         },
         "shrinking_windows": shrinking_results
     }
