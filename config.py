@@ -8,7 +8,6 @@ from datetime import datetime
 # --- Hugging Face Repositories ---
 HF_DATA_REPO = "P2SAMAPA/fi-etf-macro-signal-master-data"
 HF_DATA_FILE = "master_data.parquet"
-
 HF_OUTPUT_REPO = "P2SAMAPA/p2-etf-tda-homology-results"
 
 # --- Universe Definitions ---
@@ -26,21 +25,29 @@ UNIVERSES = {
     "COMBINED": ALL_TICKERS
 }
 
+# --- Macro Columns ---
+MACRO_COLS = ["VIX", "DXY", "T10Y2Y", "TBILL_3M"]
+
 # --- TDA Parameters ---
-LOOKBACK_WINDOW = 252                 # Rolling window for correlation/return matrix
-TDA_METHOD = "ripser"                 # "ripser" or "gudhi"
-MAX_DIM = 2                           # Compute H0, H1, H2 persistent homology
-N_LANDSCAPES = 5                      # Number of persistence landscapes to extract
-MIN_OBSERVATIONS = 100                # Minimum observations for TDA
+LOOKBACK_WINDOW = 252
+MAX_DIM = 2
+MIN_OBSERVATIONS = 100
+BETTI_ALERT_THRESHOLD = 0.5
 
-# --- Return Selection Parameters ---
-RETURN_LOOKBACK_DAYS = 21             # Period for ranking ETFs within a style
+# --- Return‑Seeking TDA Interpretation ---
+# Regime factor: amplification for return ranking
+REGIME_BOOST = {
+    "simplification": 1.5,    # strong boost for momentum
+    "neutral": 1.0,           # no adjustment
+    "fragmentation": 0.7,     # reduce, but still positive returns are okay
+    "regime_break": 0.3       # heavily reduce
+}
 
-# --- Early Warning Signals ---
-BETTI_ALERT_THRESHOLD = 0.5           # Normalized Betti number change threshold
-PERSISTENCE_ALERT_PERCENTILE = 90     # Alert when max persistence exceeds percentile
+# --- Daily and Global modes ---
+DAILY_LOOKBACK = 504
+GLOBAL_TRAIN_START = "2008-01-01"
 
-# --- Shrinking Windows ---
+# --- Shrinking Windows (fixed) ---
 SHRINKING_WINDOW_START_YEARS = list(range(2010, 2025))
 
 # --- Date Handling ---
