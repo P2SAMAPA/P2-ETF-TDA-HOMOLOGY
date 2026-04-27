@@ -45,6 +45,10 @@ def regime_badge(regime):
     badge_class = f"regime-{regime}"
     return f'<span class="{badge_class}">{regime.replace("_"," ").title()}</span>'
 
+def regime_text(regime):
+    """Plain text regime name for table columns."""
+    return regime.replace("_", " ").title()
+
 def render_mode_tab(mode_data, mode_name):
     if not mode_data:
         st.warning(f"No {mode_name} data.")
@@ -98,7 +102,7 @@ def render_shrinking_tab(shrinking_data):
             rows.append({
                 'Window': f"{w['window_start']}-{w['window_end']}",
                 'Top Pick': w['ticker'],
-                'Regime': regime_badge(w['regime'])
+                'Regime': regime_text(w.get('regime', 'neutral'))
             })
         st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
