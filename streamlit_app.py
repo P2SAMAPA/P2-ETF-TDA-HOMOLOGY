@@ -1,11 +1,9 @@
 """
-Streamlit Dashboard for TDA Homology Engine.
-Displays topological metrics and ETF selection signals.
+Streamlit Dashboard for TDA Homology Engine (Return‑Chasing).
 """
 
 import streamlit as st
 import pandas as pd
-import plotly.graph_objects as go
 from huggingface_hub import HfApi, hf_hub_download
 import json
 import config
@@ -17,18 +15,11 @@ st.markdown("""
 <style>
     .main-header { font-size: 2.5rem; font-weight: 600; color: #1f77b4; }
     .hero-card { background: linear-gradient(135deg, #1f77b4 0%, #2C5282 100%); border-radius: 16px; padding: 2rem; color: white; text-align: center; }
-    .alert-card { background: #dc3545; border-radius: 16px; padding: 2rem; color: white; text-align: center; }
-    .pick-card { background: #f8f9fa; border-radius: 12px; padding: 1.5rem; margin-bottom: 1rem; box-shadow: 0 2px 8px rgba(0,0,0,0.05); }
-    .signal-tag { display: inline-block; padding: 0.3rem 0.8rem; border-radius: 20px; font-weight: bold; }
-    .defensive { background: #28a745; color: white; }
-    .momentum { background: #007bff; color: white; }
-    .safe_haven { background: #ffc107; color: black; }
-    .neutral { background: #6c757d; color: white; }
-    .confidence-high { color: #28a745; font-weight: bold; }
-    .confidence-mid { color: #ffc107; font-weight: bold; }
-    .confidence-low { color: #dc3545; font-weight: bold; }
-    .return-positive { color: #28a745; font-weight: 600; }
-    .return-negative { color: #dc3545; font-weight: 600; }
+    .hero-ticker { font-size: 4rem; font-weight: 800; }
+    .regime-simplification { background: #28a745; color: white; padding: 0.2rem 0.8rem; border-radius: 20px; font-size: 0.9rem; }
+    .regime-fragmentation { background: #dc3545; color: white; padding: 0.2rem 0.8rem; border-radius: 20px; }
+    .regime-regime_break { background: #ffc107; color: black; padding: 0.2rem 0.8rem; border-radius: 20px; }
+    .regime-neutral { background: #6c757d; color: white; padding: 0.2rem 0.8rem; border-radius: 20px; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -50,129 +41,97 @@ def load_latest_results():
         st.error(f"Failed to load data: {e}")
         return None
 
-def style_tag(style):
-    return f'<span class="signal-tag {style}">{style.upper()}</span>'
+def regime_badge(regime):
+    badge_class = f"regime-{regime}"
+    return f'<span class="{badge_class}">{regime.replace("_"," ").title()}</span>'
 
-def confidence_badge(conf):
-    if conf >= 0.75:
-        return f'<span class="confidence-high">{conf:.2f} (High)</span>'
-    elif conf >= 0.5:
-        return f'<span class="confidence-mid">{conf:.2f} (Moderate)</span>'
-    else:
-        return f'<span class="confidence-low">{conf:.2f} (Low)</span>'
+def render_mode_tab(mode_data, mode_name):
+    if not mode_data:
+        st.warning(f"No {mode_name} data.")
+        return
+    regime = mode_data.get('regime', 'neutral')
+    confidence = mode_data.get('confidence', 0)
+    boost = mode_data.get('boost_factor', 1.0)
 
-def return_badge(ret):
-    if ret >= 0:
-        return f'<span class="return-positive">+{ret*100:.2f}%</span>'
-    else:
-        return f'<span class="return-negative">{ret*100:.2f}%</span>'
+    st.markdown(f"### {mode_name}")
+    st.markdown(f"Regime: {regime_badge(regime)} | Confidence: {confidence:.2f} | Boost: {boost:.2f}", unsafe_allow_html=True)
+
+    top = mode_data.get('top_picks', [])
+    if top:
+        pick = top[0]
+        st.markdown(f"""
+        <div class="hero-card">
+            <div style="font-size: 1.2rem; opacity: 0.8;">🧬 TOP PICK (Return‑Chasing TDA)</div>
+            <div class="hero-ticker">{pick['ticker']}</div>
+            <div>Adj Return: {pick['adjusted_score']:.4f}</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        st.markdown("### Top 3 Picks")
+        rows = [{"Ticker": p['ticker'], "Adj Return": f"{p['adjusted_score']:.4f}",
+                 "Return (21d)": f"{p['return_21d']*100:.2f}%"} for p in top]
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+        all_scores = mode_data.get('all_scores', [])
+        if all_scores:
+            st.markdown("### All ETFs")
+            df_all = pd.DataFrame(all_scores)
+            df_all['Return (21d)'] = df_all['return_21d'].apply(lambda x: f"{x*100:.2f}%")
+            df_all['Adj Return'] = df_all['adjusted_score'].apply(lambda x: f"{x:.4f}")
+            df_all = df_all[['ticker', 'Return (21d)', 'Adj Return']].sort_values('Adj Return', ascending=False)
+            st.dataframe(df_all, use_container_width=True, hide_index=True)
+
+def render_shrinking_tab(shrinking_data):
+    if not shrinking_data:
+        st.warning("No shrinking data.")
+        return
+    st.markdown(f"""
+    <div class="hero-card">
+        <div style="font-size: 1.2rem; opacity: 0.8;">🔄 SHRINKING CONSENSUS</div>
+        <div class="hero-ticker">{shrinking_data['ticker']}</div>
+        <div>{shrinking_data['conviction']:.0f}% conviction · {shrinking_data['num_windows']} windows</div>
+    </div>
+    """, unsafe_allow_html=True)
+    with st.expander("📋 All Windows"):
+        rows = []
+        for w in shrinking_data.get('windows', []):
+            rows.append({
+                'Window': f"{w['window_start']}-{w['window_end']}",
+                'Top Pick': w['ticker'],
+                'Regime': regime_badge(w['regime'])
+            })
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
 # --- Sidebar ---
 st.sidebar.markdown("## ⚙️ Configuration")
-st.sidebar.markdown(f"**Data Source:** `{config.HF_DATA_REPO}`")
 calendar = USMarketCalendar()
 st.sidebar.markdown(f"**📅 Next Trading Day:** {calendar.next_trading_day().strftime('%Y-%m-%d')}")
-st.sidebar.divider()
-st.sidebar.markdown("### 🧬 TDA Parameters")
-st.sidebar.markdown(f"- Lookback: **{config.LOOKBACK_WINDOW} days**")
-st.sidebar.markdown(f"- Max Homology Dim: **{config.MAX_DIM}**")
-st.sidebar.markdown(f"- Return Lookback: **{config.RETURN_LOOKBACK_DAYS} days**")
-
 data = load_latest_results()
 if data:
     st.sidebar.markdown(f"**Run Date:** {data.get('run_date', 'Unknown')}")
 
-st.markdown('<div class="main-header">🧬 P2Quant TDA Homology Engine</div>', unsafe_allow_html=True)
-st.markdown('<div>Persistent Homology – Market Structure & ETF Selection Signals</div>', unsafe_allow_html=True)
-
-with st.expander("📘 How to Interpret TDA Signals", expanded=False):
-    st.markdown("""
-    ### Topological Metrics
-    - **Betti‑1 Trend**: Rising → fragmentation (defensive). Falling → simplification (momentum).
-    - **Max Persistence Spike**: Regime break → safe havens.
-
-    ### Confidence Score
-    | Confidence | Meaning | Action |
-    |------------|---------|--------|
-    | 0.80–1.00 | Strong signal | Higher conviction |
-    | 0.50–0.79 | Moderate | Use as tilt |
-    | 0.00–0.49 | Weak | Rely on other engines |
-    
-    Confidence of **0.50** = model uncertain; defer to other signals.
-    
-    ### Top Picks
-    Selected from style‑specific candidates based on **{}-day return** (highest first).
-    """.format(config.RETURN_LOOKBACK_DAYS))
+st.markdown('<div class="main-header">🧬 P2Quant TDA Homology</div>', unsafe_allow_html=True)
+st.markdown('<div>Persistent Homology – Return‑Chasing Topological Regime Signals</div>', unsafe_allow_html=True)
 
 if data is None:
     st.warning("No data available.")
     st.stop()
 
-daily = data['daily_tda']
-global_signal = data.get('global_signal', {})
-top_picks_all = daily.get('top_picks', {})
-universes_data = daily.get('universes', {})
-
-# --- Hero Section: Global Regime ---
-st.markdown("## 🌐 Global Market Regime")
-col1, col2, col3 = st.columns(3)
-with col1:
-    st.metric("Regime", global_signal.get('regime', 'unknown').replace('_', ' ').title())
-with col2:
-    st.metric("Confidence", f"{global_signal.get('confidence', 0):.2f}")
-with col3:
-    style = global_signal.get('recommended_style', 'neutral')
-    st.markdown(f"**Recommended Style:** {style_tag(style)}", unsafe_allow_html=True)
-
-st.markdown("---")
-st.markdown(f"## 📈 Top 3 ETF Picks by Universe (Ranked by {config.RETURN_LOOKBACK_DAYS}-Day Return)")
-
+universes_data = data.get('universes', {})
 tabs = st.tabs(["📊 Combined", "📈 Equity Sectors", "💰 FI/Commodities"])
-universe_keys = ["COMBINED", "EQUITY_SECTORS", "FI_COMMODITIES"]
+keys = ["COMBINED", "EQUITY_SECTORS", "FI_COMMODITIES"]
 
-for tab, key in zip(tabs, universe_keys):
+for tab, key in zip(tabs, keys):
+    uni = universes_data.get(key, {})
+    if not uni:
+        with tab:
+            st.info(f"No data for {key}.")
+        continue
     with tab:
-        pick_data = top_picks_all.get(key, {})
-        picks = pick_data.get('picks', [])
-        reg = pick_data.get('regime', 'neutral')
-        conf = pick_data.get('confidence', 0.5)
-        style = pick_data.get('recommended_style', 'neutral')
-        
-        if picks:
-            st.markdown(f"**Regime:** {reg.replace('_', ' ').title()} | **Confidence:** {confidence_badge(conf)} | **Style:** {style_tag(style)}")
-            cols = st.columns(3)
-            for i, pick in enumerate(picks[:3]):
-                with cols[i]:
-                    ret = pick['return_21d']
-                    st.markdown(f"""
-                    <div class="pick-card">
-                        <h3>#{i+1} {pick['ticker']}</h3>
-                        <p style="font-size: 1.5rem;">{return_badge(ret)}</p>
-                        <p>{config.RETURN_LOOKBACK_DAYS}-day return</p>
-                    </div>
-                    """, unsafe_allow_html=True)
-        else:
-            st.info("No picks available for this universe.")
-
-# --- Topological Metrics Table ---
-st.markdown("---")
-st.markdown("### 🔬 Topological Metrics by Universe")
-rows = []
-for uni, metrics in universes_data.items():
-    rows.append({
-        'Universe': uni,
-        'Betti‑0': metrics['betti_numbers'][0],
-        'Betti‑1': metrics['betti_numbers'][1],
-        'Betti‑2': metrics['betti_numbers'][2] if len(metrics['betti_numbers'])>2 else 0,
-        'Max Persistence': f"{metrics['max_persistence']:.4f}"
-    })
-df_metrics = pd.DataFrame(rows)
-st.dataframe(df_metrics, use_container_width=True, hide_index=True)
-
-# --- Shrinking Windows ---
-if data.get('shrinking_windows'):
-    st.markdown("---")
-    st.markdown("### 📆 Historical Regime Evolution")
-    shrink = data['shrinking_windows']
-    df_shrink = pd.DataFrame(shrink).T
-    st.dataframe(df_shrink[['regime', 'confidence', 'recommended_style']], use_container_width=True)
+        d, g, s = st.tabs(["📅 Daily (504d)", "🌍 Global (2008‑YTD)", "🔄 Shrinking Consensus"])
+        with d:
+            render_mode_tab(uni.get('daily'), "Daily")
+        with g:
+            render_mode_tab(uni.get('global'), "Global")
+        with s:
+            render_shrinking_tab(uni.get('shrinking'))
