@@ -1,6 +1,5 @@
 """
-Main training script for TDA-HOMOLOGY engine.
-Computes persistent homology and generates ETF selection signals.
+Main training script – Daily, Global, and Shrinking Windows with Consensus.
 """
 
 import json
@@ -12,140 +11,132 @@ import data_manager
 from tda_model import TDAHomologyAnalyzer
 import push_results
 
-# Style-to-candidate ETFs mapping per universe
-STYLE_CANDIDATES = {
-    'defensive': {
-        'FI_COMMODITIES': ['TLT', 'LQD', 'VCIT'],
-        'EQUITY_SECTORS': ['XLP', 'XLU', 'XLV'],
-        'COMBINED': ['XLP', 'XLU', 'TLT', 'LQD']
-    },
-    'momentum': {
-        'FI_COMMODITIES': ['HYG', 'VNQ', 'GLD'],
-        'EQUITY_SECTORS': ['SPY', 'QQQ', 'XLK', 'IWF'],
-        'COMBINED': ['SPY', 'QQQ', 'HYG', 'IWF']
-    },
-    'safe_haven': {
-        'FI_COMMODITIES': ['GLD', 'SLV', 'TLT'],
-        'EQUITY_SECTORS': ['GLD', 'XLP', 'XLU'],
-        'COMBINED': ['GLD', 'SLV', 'TLT']
-    },
-    'neutral': {
-        'FI_COMMODITIES': ['LQD', 'VCIT', 'HYG'],
-        'EQUITY_SECTORS': ['SPY', 'XLV', 'XLI'],
-        'COMBINED': ['SPY', 'LQD', 'XLV']
+
+def select_etfs_by_return(returns, tickers, n=3, boost_factor=1.0):
+    """Rank ETFs by 21‑day return multiplied by regime boost."""
+    ret_21d = returns.iloc[-21:].mean() * 252
+    scores = ret_21d * boost_factor
+    sorted_tickers = scores.sort_values(ascending=False)
+    top = [{'ticker': t, 'return_21d': float(ret_21d[t]), 'adjusted_score': float(scores[t])}
+           for t in sorted_tickers.head(n).index]
+    return top
+
+
+def run_mode(returns, mode_name, macro_df=None):
+    """Run TDA on a data slice and return regime, top picks, table."""
+    if len(returns) < config.MIN_OBSERVATIONS:
+        return None
+
+    analyzer = TDAHomologyAnalyzer(max_dim=config.MAX_DIM)
+    analyzer.rolling_tda(returns.iloc[-config.LOOKBACK_WINDOW:], window=config.LOOKBACK_WINDOW)
+    regime_info = analyzer.compute_regime()
+
+    tickers = [c for c in returns.columns if c in config.ALL_TICKERS]
+    boost = regime_info['boost_factor']
+    top3 = select_etfs_by_return(returns[tickers], tickers, n=3, boost_factor=boost)
+
+    # Full table
+    ret_21d = returns[tickers].iloc[-21:].mean() * 252
+    scores = ret_21d * boost
+    table = [{'ticker': t, 'return_21d': float(ret_21d[t]), 'adjusted_score': float(scores[t])}
+             for t in tickers]
+
+    return {
+        'regime': regime_info['regime'],
+        'confidence': regime_info['confidence'],
+        'boost_factor': boost,
+        'top_picks': top3,
+        'all_scores': table,
+        'training_start': str(returns.index[0].date()),
+        'training_end': str(returns.index[-1].date())
     }
-}
 
-def compute_returns_matrix(df_wide: pd.DataFrame, tickers: list) -> pd.DataFrame:
-    """Compute recent returns for ranking."""
-    prices = df_wide.set_index('Date')[tickers]
-    returns = prices.pct_change(config.RETURN_LOOKBACK_DAYS).iloc[-1]
-    return returns
 
-def select_top_etfs_by_return(universe: str, style: str, returns: pd.Series, n: int = 3) -> list:
-    """Select top N ETFs from style candidates based on return."""
-    candidates = STYLE_CANDIDATES.get(style, {}).get(universe, [])
-    available = [t for t in candidates if t in returns.index]
-    if not available:
-        # fallback to all tickers in universe
-        available = config.UNIVERSES[universe]
-    sorted_etfs = returns[available].sort_values(ascending=False)
-    top = sorted_etfs.head(n)
-    return [{'ticker': t, 'return_21d': float(v)} for t, v in top.items()]
-
-def run_tda_analysis():
-    print(f"=== P2-ETF-TDA-HOMOLOGY Run: {config.TODAY} ===")
-    df_master = data_manager.load_master_data()
-    analyzer = TDAHomologyAnalyzer(max_dim=config.MAX_DIM, n_landscapes=config.N_LANDSCAPES)
-    
-    all_results = {}
-    top_picks_all = {}
-    alerts = {}
-    
-    # Combined universe for global TDA signal
-    returns_combined = data_manager.prepare_returns_matrix(df_master, config.ALL_TICKERS)
-    if len(returns_combined) >= config.MIN_OBSERVATIONS:
-        recent_combined = returns_combined.iloc[-config.LOOKBACK_WINDOW:]
-        analyzer.rolling_tda(returns_combined.iloc[-504:], window=config.LOOKBACK_WINDOW)
-        global_signal = analyzer.compute_regime_signal()
-    else:
-        global_signal = {'regime': 'unknown', 'confidence': 0.0, 'recommended_style': 'neutral'}
-    
-    for universe_name, tickers in config.UNIVERSES.items():
-        print(f"\n--- Processing Universe: {universe_name} ---")
-        returns = data_manager.prepare_returns_matrix(df_master, tickers)
+def run_shrinking_windows(df_master, tickers, macro_df=None):
+    """Fixed shrinking windows with consensus on top ETF."""
+    windows = []
+    for start_year in config.SHRINKING_WINDOW_START_YEARS:
+        sd = pd.Timestamp(f"{start_year}-01-01")
+        ed = pd.Timestamp(f"{start_year+2}-12-31")
+        mask = (df_master['Date'] >= sd) & (df_master['Date'] <= ed)
+        window_df = df_master[mask].copy()
+        if len(window_df) < config.MIN_OBSERVATIONS:
+            continue
+        returns = data_manager.prepare_returns_matrix(window_df, tickers)
         if len(returns) < config.MIN_OBSERVATIONS:
             continue
-        recent_returns = returns.iloc[-config.LOOKBACK_WINDOW:]
-        
-        # Local TDA metrics
-        point_cloud = analyzer.compute_point_cloud(recent_returns, method='correlation')
-        pers = analyzer.compute_persistence(point_cloud, is_distance=True)
-        
-        # Compute 21-day returns for ranking
-        returns_21d = compute_returns_matrix(df_master, tickers)
-        
-        # Select top 3 ETFs for the recommended style
-        style = global_signal['recommended_style']
-        top_picks = select_top_etfs_by_return(universe_name, style, returns_21d, n=3)
-        
-        all_results[universe_name] = {
-            'betti_numbers': pers['betti_numbers'],
-            'max_persistence': pers['max_persistence'],
-            'signal': global_signal,
-            'top_picks': top_picks
-        }
-        
-        top_picks_all[universe_name] = {
-            'regime': global_signal['regime'],
-            'confidence': global_signal['confidence'],
-            'recommended_style': style,
-            'picks': top_picks
-        }
-        
-        if global_signal['regime'] in ['fragmentation', 'regime_break']:
-            alerts[universe_name] = top_picks_all[universe_name]
-    
-    # Shrinking windows
-    shrinking_results = {}
-    for start_year in config.SHRINKING_WINDOW_START_YEARS:
-        start_date = pd.Timestamp(f"{start_year}-01-01")
-        window_label = f"{start_year}-{config.TODAY[:4]}"
-        mask = df_master['Date'] >= start_date
-        df_window = df_master[mask].copy()
-        if len(df_window) < config.MIN_OBSERVATIONS:
+
+        analyzer = TDAHomologyAnalyzer(max_dim=config.MAX_DIM)
+        analyzer.rolling_tda(returns.iloc[-config.LOOKBACK_WINDOW:], window=config.LOOKBACK_WINDOW)
+        regime_info = analyzer.compute_regime()
+        boost = regime_info['boost_factor']
+        top = select_etfs_by_return(returns, tickers, n=1, boost_factor=boost)
+        windows.append({
+            'window_start': start_year,
+            'window_end': start_year+2,
+            'ticker': top[0]['ticker'] if top else 'N/A',
+            'regime': regime_info['regime'],
+            'boost_factor': boost
+        })
+
+    if not windows:
+        return None
+
+    # Consensus
+    vote = {}
+    for w in windows:
+        vote[w['ticker']] = vote.get(w['ticker'], 0) + 1
+    pick = max(vote, key=vote.get)
+    conviction = vote[pick] / len(windows) * 100
+    return {'ticker': pick, 'conviction': conviction, 'num_windows': len(windows), 'windows': windows}
+
+
+def main():
+    import os
+    token = os.getenv("HF_TOKEN")
+    if not token:
+        print("HF_TOKEN not set")
+        return
+
+    df_master = data_manager.load_master_data()
+    df_master['Date'] = pd.to_datetime(df_master['Date'])
+    macro = data_manager.prepare_macro_features(df_master)
+
+    all_results = {}
+
+    for universe_name, tickers in config.UNIVERSES.items():
+        print(f"\n=== {universe_name} ===")
+        returns_all = data_manager.prepare_returns_matrix(df_master, tickers)
+        if len(returns_all) < config.MIN_OBSERVATIONS:
             continue
-        win_returns = data_manager.prepare_returns_matrix(df_window, config.ALL_TICKERS)
-        if len(win_returns) < config.MIN_OBSERVATIONS:
-            continue
-        win_analyzer = TDAHomologyAnalyzer(max_dim=config.MAX_DIM)
-        win_analyzer.rolling_tda(win_returns.iloc[-config.LOOKBACK_WINDOW:], window=config.LOOKBACK_WINDOW)
-        win_signal = win_analyzer.compute_regime_signal()
-        shrinking_results[window_label] = {
-            'start_year': start_year,
-            'regime': win_signal['regime'],
-            'confidence': win_signal['confidence'],
-            'recommended_style': win_signal['recommended_style']
-        }
-    
-    output_payload = {
-        "run_date": config.TODAY,
-        "config": {
-            "lookback_window": config.LOOKBACK_WINDOW,
-            "max_dim": config.MAX_DIM,
-            "return_lookback_days": config.RETURN_LOOKBACK_DAYS
-        },
-        "global_signal": global_signal,
-        "daily_tda": {
-            "universes": all_results,
-            "top_picks": top_picks_all,
-            "alerts": alerts
-        },
-        "shrinking_windows": shrinking_results
-    }
-    
-    push_results.push_daily_result(output_payload)
+
+        universe_out = {}
+
+        # Daily
+        daily_ret = returns_all.iloc[-config.DAILY_LOOKBACK:]
+        daily_out = run_mode(daily_ret, 'Daily', macro.loc[daily_ret.index])
+        if daily_out:
+            universe_out['daily'] = daily_out
+            print(f"  Daily top: {daily_out['top_picks'][0]['ticker']}")
+
+        # Global
+        global_ret = returns_all.loc[returns_all.index >= config.GLOBAL_TRAIN_START]
+        global_out = run_mode(global_ret, 'Global', macro.loc[global_ret.index])
+        if global_out:
+            universe_out['global'] = global_out
+            print(f"  Global top: {global_out['top_picks'][0]['ticker']}")
+
+        # Shrinking
+        shrinking = run_shrinking_windows(df_master, tickers, macro)
+        if shrinking:
+            universe_out['shrinking'] = shrinking
+            print(f"  Shrinking consensus: {shrinking['ticker']} ({shrinking['conviction']:.0f}%)")
+
+        all_results[universe_name] = universe_out
+
+    push_results.push_daily_result({"run_date": config.TODAY, "universes": all_results})
     print("\n=== Run Complete ===")
 
+
 if __name__ == "__main__":
-    run_tda_analysis()
+    main()
