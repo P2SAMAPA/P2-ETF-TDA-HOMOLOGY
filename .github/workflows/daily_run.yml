@@ -2,7 +2,7 @@ name: Daily TDA Homology Run
 
 on:
   schedule:
-    - cron: '00 01 * * 1-6'
+    - cron: '45 01 * * 1-6'
   workflow_dispatch:
 
 jobs:
